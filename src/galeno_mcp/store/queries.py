@@ -110,14 +110,32 @@ def contar_condicao(
 
 
 def contar_no_texto(conexao: duckdb.DuckDBPyConnection, termo: str) -> int:
-    """Quantos protocolos mencionam o termo no texto completo.
+    """Quantos protocolos casam no texto completo, pelo mesmo critério de ``buscar_no_texto``.
 
-    Sem este número, "diabetes" devolve 10 e diz total 10, quando 58 protocolos
-    mencionam o termo. Quem lê conclui que viu tudo.
+    Bug real (15/11/2026): esta contagem usava ``LIKE`` sem o filtro ``vigente`` enquanto
+    ``buscar_no_texto`` busca por FTS (com fallback pra ``LIKE`` + ``vigente``) só entre os
+    vigentes. As duas contas podiam discordar nos dois sentidos: total vindo menor que a
+    lista retornada (FTS achava o que o ``LIKE`` sem acento/stemming não achava) ou maior
+    (contava protocolo não vigente que a busca nunca devolveria). Mesma lógica aqui, em
+    contagem em vez de lista.
     """
+    try:
+        linha = conexao.execute(
+            """
+            SELECT count(*)
+            FROM protocolos
+            WHERE fts_main_protocolos.match_bm25(identificador, ?) IS NOT NULL AND vigente
+            """,
+            [termo],
+        ).fetchone()
+        return int(linha[0]) if linha else 0
+    except duckdb.Error as erro:
+        logger.debug("FTS indisponível (%s); usando LIKE", erro)
+
     padrao = f"%{termo.strip().lower()}%"
     linha = conexao.execute(
-        "SELECT count(*) FROM protocolos WHERE lower(coalesce(texto_completo, '')) LIKE ?",
+        "SELECT count(*) FROM protocolos "
+        "WHERE lower(coalesce(texto_completo, '')) LIKE ? AND vigente",
         [padrao],
     ).fetchone()
     return int(linha[0]) if linha else 0

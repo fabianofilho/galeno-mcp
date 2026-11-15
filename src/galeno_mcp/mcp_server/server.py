@@ -201,12 +201,21 @@ def _com_limite(app: Any, limite_por_minuto: int, limite_global: int) -> Any:
     return middleware
 
 
+def _remover_tools_sem_llm(mcp: Any, config: Any) -> None:
+    """No modo connector o LLM nunca roda (ver Config.modo_connector): resumir_conduta
+    sempre devolveria resumo=null. Anunciar a tool pra sempre decepcionar e pior que nao
+    anunciar (achado em uso real, 15/11/2026)."""
+    if config.modo_connector:
+        mcp.remove_tool("resumir_conduta")
+
+
 def main() -> None:
     """Sobe o servidor MCP. Stdio por padrao; HTTP no modo connector."""
     config = carregar_config()
     # Este servidor so tem tools. Anunciar prompts e resources faria quem mapeia
     # o servidor gastar chamadas para descobrir lista vazia.
     esconder_o_que_nao_existe(mcp)
+    _remover_tools_sem_llm(mcp, config)
     logging.basicConfig(
         level=getattr(logging, config.log_level.upper(), logging.INFO),
         stream=sys.stderr,

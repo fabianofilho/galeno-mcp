@@ -425,3 +425,33 @@ async def test_total_e_quantos_casam_nao_o_tamanho_da_lista(caminho_db: str) -> 
     assert r.retornados == 5
     assert r.truncado is True
     assert r.aviso is not None and "20" in r.aviso
+
+
+@pytest.mark.asyncio
+async def test_total_no_texto_nao_conta_protocolo_nao_vigente(caminho_db: str) -> None:
+    """Bug real: total vinha diferente do que a busca no texto conseguia devolver.
+
+    contar_no_texto usava LIKE sem o filtro vigente, enquanto buscar_no_texto (FTS com
+    fallback LIKE) só olha vigente. Um protocolo revogado que menciona o termo inflava o
+    total sem jamais poder aparecer na lista.
+    """
+    with conectar(caminho_db) as conexao:
+        gravar(
+            conexao,
+            [
+                _registro(identificador="d1", condicao="CONDICAO RARA 1", texto_completo=TEXTO),
+                _registro(identificador="d2", condicao="CONDICAO RARA 2", texto_completo=TEXTO),
+                _registro(
+                    identificador="d3",
+                    condicao="CONDICAO RARA 3",
+                    texto_completo=TEXTO,
+                    vigente=False,
+                ),
+            ],
+        )
+
+    r = await buscar_pcdt("fármaco", caminho_db=caminho_db)
+
+    assert r.total == 2, "o revogado nunca aparece na busca, não deveria entrar no total"
+    assert r.retornados == 2
+    assert r.truncado is False
