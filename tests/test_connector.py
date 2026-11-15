@@ -332,3 +332,36 @@ async def test_consulta_durante_coleta_avisa_em_vez_de_quebrar(tmp_path: Path) -
 
     assert resposta.total == 0
     assert resposta.aviso == AVISO_BASE_TRAVADA
+
+
+# --- resumir_conduta some do tools/list no modo connector ----------------
+
+
+async def test_resumir_conduta_some_do_tools_list_no_connector() -> None:
+    """Achado em uso real (15/11/2026): a tool ficava anunciada sempre vazia no connector.
+
+    Usa um MCPServer à parte, não o `mcp` do módulo: remove_tool muda o servidor
+    de verdade, e o `mcp` importado pelos outros testes precisa continuar com a
+    tool para não quebrar em ordem de execução diferente.
+    """
+    from mcp.server.mcpserver import MCPServer
+
+    from galeno_mcp.config import Config
+    from galeno_mcp.mcp_server.server import _remover_tools_sem_llm
+
+    def _servidor_com_resumir_conduta() -> MCPServer:
+        servidor = MCPServer("teste")
+
+        @servidor.tool()
+        async def resumir_conduta() -> None:
+            return None
+
+        return servidor
+
+    stdio = _servidor_com_resumir_conduta()
+    _remover_tools_sem_llm(stdio, Config(transporte="stdio", _env_file=None))  # type: ignore[call-arg]
+    assert "resumir_conduta" in {t.name for t in await stdio.list_tools()}
+
+    connector = _servidor_com_resumir_conduta()
+    _remover_tools_sem_llm(connector, Config(transporte="streamable-http", _env_file=None))  # type: ignore[call-arg]
+    assert "resumir_conduta" not in {t.name for t in await connector.list_tools()}
