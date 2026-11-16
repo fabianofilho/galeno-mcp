@@ -137,17 +137,20 @@ def _filtro_texto(termo: str, *, com_fts: bool) -> tuple[str, list[Any]] | None:
     frente. Com mais de uma palavra, o termo tem que aparecer como frase no texto. Com
     uma palavra só, o FTS segue sozinho, porque o stemming dele acha "diabético" para
     "diabetes". Sem FTS, a frase vale para qualquer número de palavras.
+
+    Com mais de uma palavra o FTS não entra no filtro, só na ordem: o índice ignora
+    números e stopwords em inglês ("a", "as", "no"), então exigir todos os termos dele
+    zerava "tipo 2" e "vitamina b12" enquanto o caminho sem FTS os achava.
     """
     palavras = _palavras(termo)
     if not palavras:
         return None
-    frase = (f"regexp_matches({_TEXTO_NORMALIZADO}, ?)", [_regex_frase(palavras)])
-    if not com_fts:
-        return f"{frase[0]} AND vigente", frase[1]
-    fts = "fts_main_protocolos.match_bm25(identificador, ?, conjunctive := 1) IS NOT NULL"
-    if len(palavras) == 1:
-        return f"{fts} AND vigente", [termo]
-    return f"{fts} AND {frase[0]} AND vigente", [termo, *frase[1]]
+    if com_fts and len(palavras) == 1:
+        return (
+            "fts_main_protocolos.match_bm25(identificador, ?) IS NOT NULL AND vigente",
+            [termo],
+        )
+    return f"regexp_matches({_TEXTO_NORMALIZADO}, ?) AND vigente", [_regex_frase(palavras)]
 
 
 def contar_no_texto(conexao: duckdb.DuckDBPyConnection, termo: str) -> int:
@@ -194,7 +197,7 @@ def buscar_no_texto(
                        fts_main_protocolos.match_bm25(identificador, ?) AS relevancia
                 FROM protocolos
                 WHERE {where}
-                ORDER BY relevancia DESC
+                ORDER BY relevancia DESC NULLS LAST, length(condicao)
                 LIMIT ?
                 """,
                 [termo, *parametros, limite],
