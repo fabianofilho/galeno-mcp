@@ -550,3 +550,35 @@ async def test_limite_acima_do_teto_do_texto_nao_manda_aumentar(caminho_db: str)
     assert r.aviso is not None
     assert "aumente" not in r.aviso
     assert f"no máximo {TETO_TEXTO}" in r.aviso
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("com_fts", [True, False], ids=["fts", "sem-fts"])
+async def test_frase_com_numero_ou_stopword_acha_com_e_sem_fts(
+    caminho_db: str, com_fts: bool
+) -> None:
+    """O índice FTS ignora números e stopwords em inglês; exigir todos os termos dele
+    zerava 'tipo 2' no caminho com FTS enquanto o sem FTS achava."""
+    with conectar(caminho_db) as conexao:
+        gravar(
+            conexao,
+            [
+                _registro(
+                    identificador="dislipidemia",
+                    condicao="Dislipidemia",
+                    texto_completo="Pacientes com diabetes tipo 2 e reposição de vitamina B12.",
+                ),
+                _registro(
+                    identificador="outro",
+                    condicao="Outro",
+                    texto_completo="Tipo de reação adversa em 2 casos.",
+                ),
+            ],
+        )
+        if com_fts:
+            assert reindexar_fts(conexao)
+
+    for termo in ("tipo 2", "vitamina b12", "diabetes tipo 2"):
+        r = await buscar_pcdt(termo, caminho_db=caminho_db)
+        assert [p.identificador for p in r.resultados] == ["dislipidemia"], termo
+        assert r.total == 1, termo
