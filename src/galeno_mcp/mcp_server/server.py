@@ -52,8 +52,10 @@ async def buscar_pcdt(
     Procura primeiro no nome dos PCDTs, sem acento, com as palavras em qualquer
     ordem e aceitando algumas siglas ("HAS", "DPOC", "DM2") e a grafia "diabetes
     mellitus". Se o nome não casar, procura o termo no texto dos protocolos e
-    devolve até 5, com origem="texto" e um aviso: esses só citam o termo e
-    muitas vezes não são o PCDT da condição.
+    devolve até `limite` (no máximo 20), com origem="texto" e um aviso: esses só
+    citam o termo e muitas vezes não são o PCDT da condição. No texto, um termo de
+    várias palavras precisa aparecer como frase ("prótese mamária" não casa com
+    "prótese" num parágrafo e "mamária" em outro).
 
     A resposta traz `total` (quantos casam na base) e `retornados` (quantos vieram).
     Com `truncado=true`, não conte os resultados para dizer quantos protocolos
@@ -68,7 +70,7 @@ async def buscar_pcdt(
 
     Args:
         doenca_ou_condicao: nome da doença ou condição, por exemplo "asma".
-        limite: quantos protocolos trazer pelo nome, de 1 a 100.
+        limite: quantos protocolos trazer, de 1 a 100 pelo nome e até 20 pelo texto.
     """
     config = carregar_config()
     return await _buscar_pcdt(doenca_ou_condicao, caminho_db=str(config.duckdb_path), limite=limite)
