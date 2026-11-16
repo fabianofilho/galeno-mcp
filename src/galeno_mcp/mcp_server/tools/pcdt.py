@@ -34,6 +34,9 @@ AVISO_SO_NO_TEXTO = (
     "Nenhum PCDT com esse nome. Estes protocolos apenas citam o termo no texto e podem "
     "não ter relação com a condição; não trate nenhum deles como o PCDT dela."
 )
+# Teto da busca no texto. Quem cai nela é quem não achou o PCDT pelo nome, e os
+# achados só citam o termo; mais que isso vira ruído na resposta.
+TETO_TEXTO = 20
 AVISO_LEITURA = (
     "O resumo é uma ajuda de leitura gerada por LLM local, não substitui o protocolo. "
     "Confira a citação literal e abra o PDF completo antes de qualquer decisão."
@@ -89,7 +92,8 @@ class RespostaConsulta(BaseModel):
         default=False,
         description=(
             "True quando total > retornados. Não conte os resultados para dizer quantos "
-            "protocolos tratam do assunto: use 'total' e aumente 'limite' se precisar."
+            "protocolos tratam do assunto: use 'total'. Se 'limite' ainda não chegou ao "
+            "teto (100 pelo nome, 20 no texto), aumente-o para ver mais."
         ),
     )
     resultados: list[Protocolo]
@@ -148,16 +152,18 @@ async def buscar_pcdt(
     *,
     caminho_db: str,
     limite: int = 10,
-    limite_texto: int = 5,
+    teto_texto: int = TETO_TEXTO,
 ) -> RespostaConsulta:
     """PCDT vigente para uma doença ou condição.
 
     Busca primeiro pelo nome da condição; se não achar, procura no texto dos
     protocolos, porque uma condição pode ser tratada dentro do PCDT de outra.
     Resultados do texto vêm marcados com ``origem="texto"`` e com um aviso, porque
-    muitas vezes só mencionam o termo de passagem.
+    muitas vezes só mencionam o termo de passagem. No texto, ``limite`` vale até
+    ``teto_texto``.
     """
     termo = doenca_ou_condicao.strip()
+    limite_texto = min(limite, teto_texto)
     if not termo:
         return RespostaConsulta(termo=termo, total=0, resultados=[], aviso="Informe uma condição.")
 
@@ -182,10 +188,16 @@ async def buscar_pcdt(
     elif origem == "texto":
         aviso = AVISO_SO_NO_TEXTO
     if truncado:
+        # Bug real (15/11/2026): o texto devolvia 5 com limite=10 e o aviso mandava
+        # aumentar o limite, que não mudava nada. Só sugere aumentar se adianta.
+        if origem == "texto" and limite >= teto_texto:
+            mais = f"a busca no texto devolve no máximo {teto_texto} por chamada."
+        else:
+            mais = "aumente 'limite' para ver mais."
         aviso = (
             f"{aviso or ''} Casaram {total} protocolos e estão aqui os {len(linhas)} "
             f"primeiros. Não conte os resultados para dizer quantos tratam do assunto: "
-            f"use 'total' e aumente 'limite' para ver mais."
+            f"use 'total'; {mais}"
         ).strip()
     return RespostaConsulta(
         termo=termo,

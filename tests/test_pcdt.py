@@ -12,8 +12,8 @@ import pytest
 import respx
 
 from galeno_mcp.llm.resumir import conferir_citacao
-from galeno_mcp.mcp_server.tools.pcdt import buscar_pcdt, resumir_conduta
-from galeno_mcp.store.db import aplicar_schema, conectar
+from galeno_mcp.mcp_server.tools.pcdt import TETO_TEXTO, buscar_pcdt, resumir_conduta
+from galeno_mcp.store.db import aplicar_schema, conectar, reindexar_fts
 from galeno_mcp.store.queries import buscar_condicao, gravar, por_identificador
 
 ENDPOINT = "http://llm-de-teste/v1"
@@ -419,7 +419,7 @@ async def test_total_e_quantos_casam_nao_o_tamanho_da_lista(caminho_db: str) -> 
             [[str(i), f"CONDICAO RARA {i}"] for i in range(20)],
         )
 
-    r = await buscar_pcdt("diabetes", caminho_db=caminho_db, limite_texto=5)
+    r = await buscar_pcdt("diabetes", caminho_db=caminho_db, limite=5)
 
     assert r.total == 20, "o universo que casa, não a página"
     assert r.retornados == 5
@@ -455,3 +455,98 @@ async def test_total_no_texto_nao_conta_protocolo_nao_vigente(caminho_db: str) -
     assert r.total == 2, "o revogado nunca aparece na busca, não deveria entrar no total"
     assert r.retornados == 2
     assert r.truncado is False
+
+
+def _base_protese(caminho_db: str, *, com_fts: bool) -> None:
+    """Dois protocolos com 'prótese' e 'mamária' soltas e um com a frase."""
+    with conectar(caminho_db) as conexao:
+        gravar(
+            conexao,
+            [
+                _registro(
+                    identificador="câncer de mama",
+                    condicao="Câncer de Mama",
+                    texto_completo="Glândula mamária. Na reconstrução, a prótese de silicone.",
+                ),
+                _registro(
+                    identificador="leiomioma de útero",
+                    condicao="Leiomioma de Útero",
+                    texto_completo="Prótese não se aplica. Tecido mamário e mamária.",
+                ),
+                _registro(
+                    identificador="linfoma anaplásico",
+                    condicao="Linfoma Anaplásico de Grandes Células",
+                    texto_completo="Associado ao implante de PRÓTESE\nMAMÁRIA texturizada.",
+                ),
+            ],
+        )
+        if com_fts:
+            assert reindexar_fts(conexao)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("com_fts", [True, False], ids=["fts", "sem-fts"])
+async def test_texto_com_varias_palavras_exige_a_frase(caminho_db: str, com_fts: bool) -> None:
+    """Bug real (15/11/2026): 'prótese mamária' casava as palavras soltas, total 91,
+    com câncer de mama, leiomioma e hemangioma à frente."""
+    _base_protese(caminho_db, com_fts=com_fts)
+
+    r = await buscar_pcdt("prótese mamária", caminho_db=caminho_db, limite=10)
+
+    assert [p.identificador for p in r.resultados] == ["linfoma anaplásico"]
+    assert r.total == 1
+    assert r.truncado is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("com_fts", [True, False], ids=["fts", "sem-fts"])
+async def test_texto_de_uma_palavra_continua_achando(caminho_db: str, com_fts: bool) -> None:
+    _base_protese(caminho_db, com_fts=com_fts)
+
+    r = await buscar_pcdt("prótese", caminho_db=caminho_db)
+
+    assert r.total == 3
+    assert r.retornados == 3
+
+
+def _base_texto(caminho_db: str, quantos: int) -> None:
+    with conectar(caminho_db) as conexao:
+        gravar(
+            conexao,
+            [
+                _registro(
+                    identificador=f"rara {i}",
+                    condicao=f"CONDICAO RARA {i}",
+                    texto_completo="trata de diabetes entre outras coisas",
+                )
+                for i in range(quantos)
+            ],
+        )
+        assert reindexar_fts(conexao)
+
+
+@pytest.mark.asyncio
+async def test_limite_vale_na_busca_por_texto(caminho_db: str) -> None:
+    """Bug real (15/11/2026): limite=10 devolvia 5 no texto e o aviso mandava aumentar
+    o limite, o que não mudava nada."""
+    _base_texto(caminho_db, 30)
+
+    r = await buscar_pcdt("diabetes", caminho_db=caminho_db, limite=10)
+
+    assert r.total == 30
+    assert r.retornados == 10
+    assert r.truncado is True
+    assert r.aviso is not None and "aumente 'limite'" in r.aviso
+
+
+@pytest.mark.asyncio
+async def test_limite_acima_do_teto_do_texto_nao_manda_aumentar(caminho_db: str) -> None:
+    _base_texto(caminho_db, 30)
+
+    r = await buscar_pcdt("diabetes", caminho_db=caminho_db, limite=50)
+
+    assert r.retornados == TETO_TEXTO
+    assert r.truncado is True
+    assert r.aviso is not None
+    assert "aumente" not in r.aviso
+    assert f"no máximo {TETO_TEXTO}" in r.aviso

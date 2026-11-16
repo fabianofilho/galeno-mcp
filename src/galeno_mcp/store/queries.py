@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from typing import Any
 
 import duckdb
@@ -109,36 +110,68 @@ def contar_condicao(
     return int(linha[0]) if linha else 0
 
 
+def _palavras(termo: str) -> list[str]:
+    """Palavras do termo sem acento e em minúsculas, como o texto é comparado."""
+    sem_acento = unicodedata.normalize("NFKD", termo.lower()).encode("ascii", "ignore").decode()
+    return re.findall(r"[a-z0-9]+", sem_acento)
+
+
+def _regex_frase(palavras: list[str]) -> str:
+    """Regex das palavras em sequência, cada uma inteira e com plural opcional.
+
+    Entre as palavras aceita espaço, quebra de linha e hífen, que é o que o texto
+    extraído do PDF põe entre elas.
+    """
+    corpo = r"[\s-]+".join(f"{re.escape(p)}s?" for p in palavras)
+    return f"(^|[^a-z0-9]){corpo}([^a-z0-9]|$)"
+
+
+_TEXTO_NORMALIZADO = "strip_accents(lower(coalesce(texto_completo, '')))"
+
+
+def _filtro_texto(termo: str, *, com_fts: bool) -> tuple[str, list[Any]] | None:
+    """WHERE da busca no texto, o mesmo para listar e para contar.
+
+    Bug real (15/11/2026): "prótese mamária" casava as palavras soltas (o FTS do DuckDB
+    junta os termos com OU) e devolvia 91 protocolos, câncer de mama e leiomioma à
+    frente. Com mais de uma palavra, o termo tem que aparecer como frase no texto. Com
+    uma palavra só, o FTS segue sozinho, porque o stemming dele acha "diabético" para
+    "diabetes". Sem FTS, a frase vale para qualquer número de palavras.
+    """
+    palavras = _palavras(termo)
+    if not palavras:
+        return None
+    frase = (f"regexp_matches({_TEXTO_NORMALIZADO}, ?)", [_regex_frase(palavras)])
+    if not com_fts:
+        return f"{frase[0]} AND vigente", frase[1]
+    fts = "fts_main_protocolos.match_bm25(identificador, ?, conjunctive := 1) IS NOT NULL"
+    if len(palavras) == 1:
+        return f"{fts} AND vigente", [termo]
+    return f"{fts} AND {frase[0]} AND vigente", [termo, *frase[1]]
+
+
 def contar_no_texto(conexao: duckdb.DuckDBPyConnection, termo: str) -> int:
     """Quantos protocolos casam no texto completo, pelo mesmo critério de ``buscar_no_texto``.
 
     Bug real (15/11/2026): esta contagem usava ``LIKE`` sem o filtro ``vigente`` enquanto
     ``buscar_no_texto`` busca por FTS (com fallback pra ``LIKE`` + ``vigente``) só entre os
-    vigentes. As duas contas podiam discordar nos dois sentidos: total vindo menor que a
-    lista retornada (FTS achava o que o ``LIKE`` sem acento/stemming não achava) ou maior
-    (contava protocolo não vigente que a busca nunca devolveria). Mesma lógica aqui, em
-    contagem em vez de lista.
+    vigentes, e as duas contas discordavam. As duas usam ``_filtro_texto``.
     """
-    try:
-        linha = conexao.execute(
-            """
-            SELECT count(*)
-            FROM protocolos
-            WHERE fts_main_protocolos.match_bm25(identificador, ?) IS NOT NULL AND vigente
-            """,
-            [termo],
-        ).fetchone()
-        return int(linha[0]) if linha else 0
-    except duckdb.Error as erro:
-        logger.debug("FTS indisponível (%s); usando LIKE", erro)
-
-    padrao = f"%{termo.strip().lower()}%"
-    linha = conexao.execute(
-        "SELECT count(*) FROM protocolos "
-        "WHERE lower(coalesce(texto_completo, '')) LIKE ? AND vigente",
-        [padrao],
-    ).fetchone()
-    return int(linha[0]) if linha else 0
+    for com_fts in (True, False):
+        filtro = _filtro_texto(termo, com_fts=com_fts)
+        if filtro is None:
+            return 0
+        where, parametros = filtro
+        try:
+            linha = conexao.execute(
+                f"SELECT count(*) FROM protocolos WHERE {where}", parametros
+            ).fetchone()
+            return int(linha[0]) if linha else 0
+        except duckdb.Error as erro:
+            if not com_fts:
+                raise
+            logger.debug("FTS indisponível (%s); usando a frase sem FTS", erro)
+    return 0
 
 
 def buscar_no_texto(
@@ -147,35 +180,40 @@ def buscar_no_texto(
     *,
     limite: int = 10,
 ) -> list[dict[str, Any]]:
-    """Busca no texto completo, via FTS quando disponível."""
+    """Busca no texto completo, via FTS quando disponível. Critério em ``_filtro_texto``."""
     colunas = _colunas(conexao)
+    filtro = _filtro_texto(termo, com_fts=True)
+    if filtro is None:
+        return []
+    where, parametros = filtro
     try:
         return _para_dicts(
             conexao.execute(
                 f"""
-                SELECT {colunas}, fts_main_protocolos.match_bm25(identificador, ?) AS relevancia
+                SELECT {colunas},
+                       fts_main_protocolos.match_bm25(identificador, ?) AS relevancia
                 FROM protocolos
-                WHERE relevancia IS NOT NULL AND vigente
+                WHERE {where}
                 ORDER BY relevancia DESC
                 LIMIT ?
                 """,
-                [termo, limite],
+                [termo, *parametros, limite],
             )
         )
     except duckdb.Error as erro:
-        logger.debug("FTS indisponível (%s); usando LIKE", erro)
+        logger.debug("FTS indisponível (%s); usando a frase sem FTS", erro)
 
-    padrao = f"%{termo.strip()}%"
+    where, parametros = _filtro_texto(termo, com_fts=False) or ("FALSE", [])
     return _para_dicts(
         conexao.execute(
             f"""
             SELECT {colunas}, NULL AS relevancia
             FROM protocolos
-            WHERE lower(coalesce(texto_completo, '')) LIKE lower(?) AND vigente
+            WHERE {where}
             ORDER BY length(condicao)
             LIMIT ?
             """,
-            [padrao, limite],
+            [*parametros, limite],
         )
     )
 
